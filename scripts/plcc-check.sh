@@ -193,6 +193,14 @@ _read_operators_file() {
         log_error "no operator names found in $g_operators_file"
         exit 1
     fi
+    # Package selection is set-based. Deduplicate repeated file entries while
+    # preserving their first-seen order so totals and result buckets use the
+    # same cardinality.
+    printf '%s\n' "${g_operators[@]}" | awk '!seen[$0]++' > "$FILE_REQUESTED"
+    g_operators=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && g_operators+=("$line")
+    done < "$FILE_REQUESTED"
     g_operators_number=${#g_operators[@]}
 
     local pkg_list
@@ -272,21 +280,21 @@ fetch_catalog_packages() {
     done < "$FILE_CATALOG"
 }
 
-# True (exit 0) if "$1" is present in g_catalog_packages.
-in_catalog() {
-    local name="$1" p
-    if [[ ${#g_catalog_packages[@]} -gt 0 ]]; then
-        for p in "${g_catalog_packages[@]}"; do
-            [[ "$p" == "$name" ]] && return 0
-        done
+# Filters sorted package names from stdin to the selected operator set. In
+# all-packages mode every name is retained. awk provides a portable set here;
+# Bash associative arrays would break the script's Bash 3.2 compatibility.
+_only_scoped_names() {
+    if [[ -n "$g_operators_file" ]]; then
+        awk 'NR == FNR { wanted[$0] = 1; next } ($0 in wanted)' "$FILE_REQUESTED" -
+    else
+        cat
     fi
-    return 1
 }
 
 # In "all packages" mode, derives g_operators from the run's own output
 # (no -p flag means package names aren't known ahead of time; missing
-# packages can't be detected in this mode). Requires g_results_withissues
-# and g_results_duplicated to already be populated.
+# packages can't be detected in this mode). Requires the validation result
+# arrays to already be populated.
 _derive_operators_from_output() {
     [[ -n "$g_operators_file" ]] && return
 
@@ -308,6 +316,28 @@ _derive_operators_from_output() {
             [[ -n "$name" ]] && sorted+=("$name")
         done < <(printf '%s\n' "${g_operators[@]}" | sort -u)
         g_operators=("${sorted[@]}")
+    fi
+
+    # A lifecycle entry served by the catalog but absent from current PLCC
+    # data is stale catalog content. Include it in all-packages reports and
+    # mark it as missing from PLCC.
+    if [[ -n "$g_catalog_image" && ${#g_catalog_packages[@]} -gt 0 ]]; then
+        : > "$FILE_PLCC_OPERATORS"
+        if [[ ${#g_operators[@]} -gt 0 ]]; then
+            printf '%s\n' "${g_operators[@]}" > "$FILE_PLCC_OPERATORS"
+        fi
+        while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            g_results_missing+=("$name")
+            g_operators+=("$name")
+        done < <(awk 'FILENAME == ARGV[1] { plcc[$0] = 1; next } !($0 in plcc)' \
+            "$FILE_PLCC_OPERATORS" "$FILE_CATALOG")
+
+        local all_sorted=()
+        while IFS= read -r name; do
+            [[ -n "$name" ]] && all_sorted+=("$name")
+        done < <(printf '%s\n' "${g_operators[@]}" | sort -u)
+        g_operators=("${all_sorted[@]}")
     fi
 }
 
@@ -333,31 +363,26 @@ _classify_operator() {
     g_classify_result="passed"
 }
 
-# Computes the per-operator checks for name "$1": g_mark_plcc ("OK",
-# "DUPLICATE", "INVALID", or "MISSING"), g_mark_catalog ("OK"/"MISSING", or
-# "-" when --catalog-image wasn't given), and g_mark_done ("*" when every
-# enabled check is "OK", for a quick at-a-glance scan; "" otherwise);
+# Computes the per-operator checks for name "$1" using the precomputed catalog
+# status in "$2": g_mark_plcc, g_mark_catalog, and g_mark_done ("*" when
+# every enabled check is "OK", for a quick at-a-glance scan; "" otherwise).
 # The catalog check runs regardless of the PLCC outcome: a package can
 # disappear from PLCC or fail validation while still being served from an
 # older, stale catalog build, which is itself worth surfacing.
 _check_marks() {
-    local name="$1"
+    local name="$1" catalog_status="$2"
     _classify_operator "$name"
 
     case "$g_classify_result" in
         missing) g_mark_plcc="MISSING" ;;
         passed) g_mark_plcc="OK" ;;
         duplicated) g_mark_plcc="DUPLICATE" ;;
-        *) g_mark_plcc="INVALID" ;;
+        issues) g_mark_plcc="INVALID" ;;
     esac
 
     g_mark_catalog="-"
     if [[ -n "$g_catalog_image" ]]; then
-        if in_catalog "$name"; then
-            g_mark_catalog="OK"
-        else
-            g_mark_catalog="MISSING"
-        fi
+        g_mark_catalog="$catalog_status"
     fi
 
     g_mark_done=""
@@ -366,9 +391,7 @@ _check_marks() {
     fi
 }
 
-# Populates g_results_missing, g_results_issues, g_results_withissues,
-# g_results_duplicated, g_operators, g_results_notincatalog, g_results_plccok,
-# and g_results_allpassed from FILE_LOG/FILE_VAL and the run output.
+# Populates the result arrays from FILE_LOG/FILE_VAL and the run output.
 collect_results() {
     # Missing operators: slog warnings about packages not found in PLCC data.
     while IFS= read -r name; do
@@ -378,39 +401,72 @@ collect_results() {
     # Operators with validation issues: stderr JSONL entries with valid=false.
     # packageName is kept exactly as PLCC recorded it (may be a comma-separated
     # list for products not yet expanded into separate packages).
-    g_results_issues="$(jq -s '[.[] | select((.reasons | length) > 0)]' "$FILE_VAL" 2>/dev/null || echo '[]')"
+    g_results_issues="$(jq -s '[.[] | select(.valid == false and (.reasons | length) > 0)]' "$FILE_VAL" 2>/dev/null || echo '[]')"
 
     # REQ-VAL-01 (duplicate package name across products) is a catalog-level
     # rejection, mutually exclusive with per-product issues: a duplicate is
     # dropped before per-product validation ever runs, so it can't also carry
     # other reasons. Split it into its own bucket rather than lumping it into
-    # g_results_withissues.
+    # the per-layer invalid result arrays.
     while IFS= read -r name; do
         [[ -n "$name" ]] && g_results_duplicated+=("$name")
     done < <(echo "$g_results_issues" | jq -r '.[] | select(any(.reasons[]; startswith("REQ-VAL-01"))) | .packageName' \
         | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sort -u)
 
-    # Build the set of individual operator names with (non-duplicate) issues,
-    # splitting any comma-separated packageName so it lines up with individual
-    # operator names.
+    # Build the unified set of invalid PLCC data entries, regardless of which
+    # validation layer detected the problem. Scope it to the selected operator
+    # file so a PLCC product carrying
+    # "a,b" cannot count b when only a was requested.
     while IFS= read -r name; do
         [[ -n "$name" ]] && g_results_withissues+=("$name")
-    done < <(echo "$g_results_issues" | jq -r '.[] | select(any(.reasons[]; startswith("REQ-VAL-01")) | not) | .packageName' \
-        | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sort -u)
+    done < <(echo "$g_results_issues" \
+        | jq -r '.[] | select(any(.reasons[]; startswith("REQ-VAL-01")) | not) | .packageName' \
+        | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sort -u | _only_scoped_names)
+
+    # Duplicate reports can also reference comma-separated PLCC products.
+    # Restrict them after splitting for consistent selected-mode counts.
+    local scoped_duplicates=()
+    if [[ ${#g_results_duplicated[@]} -gt 0 ]]; then
+        while IFS= read -r name; do
+            [[ -n "$name" ]] && scoped_duplicates+=("$name")
+        done < <(printf '%s\n' "${g_results_duplicated[@]}" | sort -u | _only_scoped_names)
+    fi
+    g_results_duplicated=()
+    if [[ ${#scoped_duplicates[@]} -gt 0 ]]; then
+        g_results_duplicated=("${scoped_duplicates[@]}")
+    fi
 
     _derive_operators_from_output
 
+    # Build catalog membership once with awk's associative array, then retain
+    # an index-aligned status array for O(1) reuse by every renderer.
+    : > "$FILE_OPERATORS"
     if [[ ${#g_operators[@]} -gt 0 ]]; then
-        for name in "${g_operators[@]}"; do
+        printf '%s\n' "${g_operators[@]}" > "$FILE_OPERATORS"
+    fi
+    if [[ -n "$g_catalog_image" ]]; then
+        awk 'FILENAME == ARGV[1] { catalog[$0] = 1; next }
+             { print (($0 in catalog) ? "OK" : "MISSING") }' \
+            "$FILE_CATALOG" "$FILE_OPERATORS" > "$FILE_CATALOG_STATUS"
+    else
+        awk '{ print "-" }' "$FILE_OPERATORS" > "$FILE_CATALOG_STATUS"
+    fi
+    while IFS= read -r status; do
+        g_operator_catalog_statuses+=("$status")
+    done < "$FILE_CATALOG_STATUS"
+
+    if [[ ${#g_operators[@]} -gt 0 ]]; then
+        local operator_index status
+        for operator_index in "${!g_operators[@]}"; do
+            name="${g_operators[$operator_index]}"
+            status="${g_operator_catalog_statuses[$operator_index]}"
             _classify_operator "$name"
-            local is_in_catalog=true
-            if [[ -n "$g_catalog_image" ]] && ! in_catalog "$name"; then
-                is_in_catalog=false
+            if [[ "$status" == "MISSING" ]]; then
                 g_results_notincatalog+=("$name")
             fi
             if [[ "$g_classify_result" == "passed" ]]; then
                 g_results_plccok+=("$name")
-                if $is_in_catalog; then
+                if [[ "$status" != "MISSING" ]]; then
                     g_results_allpassed+=("$name")
                 fi
             fi
@@ -419,13 +475,6 @@ collect_results() {
 }
 
 print_operator_list() {
-    local max_len=0
-    if [[ ${#g_operators[@]} -gt 0 ]]; then
-        for name in "${g_operators[@]}"; do
-            (( ${#name} > max_len )) && max_len=${#name}
-        done
-    fi
-
     log_info ""
     log_info "=== Requested operators ==="
     if [[ -n "$g_catalog_image" ]]; then
@@ -434,13 +483,15 @@ print_operator_list() {
         log_info "$(printf "  %-1s  %-9s  %s\n" " " "PLCC" "OPERATOR")"
     fi
     if [[ ${#g_operators[@]} -gt 0 ]]; then
-        for name in "${g_operators[@]}"; do
-            _check_marks "$name"
+        local operator_index
+        for operator_index in "${!g_operators[@]}"; do
+            name="${g_operators[$operator_index]}"
+            _check_marks "$name" "${g_operator_catalog_statuses[$operator_index]}"
             if [[ -n "$g_catalog_image" ]]; then
-                log_info "$(printf "  %-1s  %-9s  %-7s  %-${max_len}s\n" \
+                log_info "$(printf "  %-1s  %-9s  %-7s  %s\n" \
                     "$g_mark_done" "$g_mark_plcc" "$g_mark_catalog" "$name")"
             else
-                log_info "$(printf "  %-1s  %-9s  %-${max_len}s\n" \
+                log_info "$(printf "  %-1s  %-9s  %s\n" \
                     "$g_mark_done" "$g_mark_plcc" "$name")"
             fi
         done
@@ -454,7 +505,7 @@ print_summary() {
     local missing_count=${#g_results_missing[@]}
     local duplicated_count=${#g_results_duplicated[@]}
     local issues_count=${#g_results_withissues[@]}
-    local ok_count=$((total - missing_count - duplicated_count - issues_count))
+    local ok_count=${#g_results_plccok[@]}
     log_info "$(printf "  %-18s %d\n" "Total operators:" "$total")"
     log_info "$(printf "  %-18s %d / %d\n" "PLCC OK:" "$ok_count" "$total")"
     log_info "$(printf "  %-18s %d / %d\n" "PLCC DUPLICATE:" "$duplicated_count" "$total")"
@@ -483,15 +534,23 @@ print_issues_detail() {
 }
 
 print_csv_lists() {
+    local missing_csv duplicated_csv issues_csv plcc_ok_csv
+    local catalog_missing_csv fully_done_csv
+    missing_csv="$(IFS=,; echo "${g_results_missing[*]:-}")"
+    duplicated_csv="$(IFS=,; echo "${g_results_duplicated[*]:-}")"
+    issues_csv="$(IFS=,; echo "${g_results_withissues[*]:-}")"
+    plcc_ok_csv="$(IFS=,; echo "${g_results_plccok[*]:-}")"
     log_info ""
     log_info "=== CSV operator lists ==="
-    log_info "- Missing: $(IFS=,; echo "${g_results_missing[*]:-}")"
-    log_info "- Duplicated: $(IFS=,; echo "${g_results_duplicated[*]:-}")"
-    log_info "- With issues: $(IFS=,; echo "${g_results_withissues[*]:-}")"
-    log_info "- PLCC OK: $(IFS=,; echo "${g_results_plccok[*]:-}")"
+    log_info "- Missing:${missing_csv:+ $missing_csv}"
+    log_info "- Duplicated:${duplicated_csv:+ $duplicated_csv}"
+    log_info "- With issues:${issues_csv:+ $issues_csv}"
+    log_info "- PLCC OK:${plcc_ok_csv:+ $plcc_ok_csv}"
     if [[ -n "$g_catalog_image" ]]; then
-        log_info "- Catalog missing: $(IFS=,; echo "${g_results_notincatalog[*]:-}")"
-        log_info "- Fully done: $(IFS=,; echo "${g_results_allpassed[*]:-}")"
+        catalog_missing_csv="$(IFS=,; echo "${g_results_notincatalog[*]:-}")"
+        fully_done_csv="$(IFS=,; echo "${g_results_allpassed[*]:-}")"
+        log_info "- Catalog missing:${catalog_missing_csv:+ $catalog_missing_csv}"
+        log_info "- Fully done:${fully_done_csv:+ $fully_done_csv}"
     fi
 }
 
@@ -521,7 +580,7 @@ copy_output_files() {
     fi
 
     log_info ""
-    log_info " === Generated files ==="
+    log_info "=== Generated files ==="
     _copy_one_file "$FILE_FBC" "$out_FBC" "$msg_FBC"
     _copy_one_file "$FILE_VAL" "$out_VAL" "$msg_VAL"
     _copy_one_file "$FILE_LOG" "$out_LOG" "$msg_LOG"
@@ -584,8 +643,10 @@ _write_requested_operator_chunks() {
         for name in "${g_operators[@]}"; do
             (( ${#name} > max_name_length )) && max_name_length=${#name}
         done
-        for name in "${g_operators[@]}"; do
-            _check_marks "$name"
+        local operator_index
+        for operator_index in "${!g_operators[@]}"; do
+            name="${g_operators[$operator_index]}"
+            _check_marks "$name" "${g_operator_catalog_statuses[$operator_index]}"
             if [[ -n "$g_catalog_image" ]]; then
                 if [[ "$g_mark_plcc" == "OK" && "$g_mark_catalog" == "OK" ]]; then
                     marker="✅"
@@ -617,7 +678,7 @@ _render_webhook_payload() {
         --arg url "$run_url" \
         --arg scope "$([[ -n "$g_operators_file" ]] && echo 'Selected operators' || echo 'All operators')" \
         --argjson total "$total" \
-        --argjson plcc_ok "$((total - missing_count - duplicated_count - issues_count))" \
+        --argjson plcc_ok "${#g_results_plccok[@]}" \
         --argjson plcc_duplicate "$duplicated_count" \
         --argjson plcc_invalid "$issues_count" \
         --argjson plcc_missing "$missing_count" \
@@ -689,6 +750,10 @@ main() {
     FILE_VAL="$WORK_DIR/validation.jsonl"
     FILE_SUM="$WORK_DIR/summary.txt"
     FILE_CATALOG="$WORK_DIR/catalog-packages.txt"
+    FILE_REQUESTED="$WORK_DIR/requested-packages.txt"
+    FILE_PLCC_OPERATORS="$WORK_DIR/plcc-operators.txt"
+    FILE_OPERATORS="$WORK_DIR/operators.txt"
+    FILE_CATALOG_STATUS="$WORK_DIR/catalog-status.txt"
     trap 'rm -rf "$WORK_DIR"' EXIT
 
     parse_args "$@"
@@ -707,6 +772,7 @@ main() {
     g_results_notincatalog=()
     g_results_plccok=()
     g_results_allpassed=()
+    g_operator_catalog_statuses=()
     g_results_issues=""
     collect_results
 

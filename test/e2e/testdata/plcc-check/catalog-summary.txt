@@ -4,10 +4,10 @@ Fetching catalog package list from $CATALOG_IMAGE...
 
 === Requested operators ===
      PLCC       CATALOG  OPERATOR
-  *  OK         OK       aws-efs-csi-driver-operator     
-     INVALID    MISSING  barbican-operator               
+  *  OK         OK       aws-efs-csi-driver-operator
+     INVALID    MISSING  barbican-operator
      MISSING    MISSING  totally-nonexistent-operator-xyz
-     DUPLICATE  MISSING  amq-streams                     
+     DUPLICATE  MISSING  amq-streams
 
 === Summary ===
   Total operators:   4
@@ -35,7 +35,7 @@ Fetching catalog package list from $CATALOG_IMAGE...
 - Catalog missing: barbican-operator,totally-nonexistent-operator-xyz,amq-streams
 - Fully done: aws-efs-csi-driver-operator
 
- === Generated files ===
+=== Generated files ===
   $OUTDIR/fbc-output.yaml FBC blobs
   $OUTDIR/validation.jsonl Validation results
   $OUTDIR/slog.json Operational log

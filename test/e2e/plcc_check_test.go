@@ -421,6 +421,69 @@ func TestPlccCheckMissingFBCOutput(t *testing.T) {
 	}
 }
 
+func TestPlccCheckScopesCommaSeparatedValidationResult(t *testing.T) {
+	fixtureDir := t.TempDir()
+	inputPath := filepath.Join(fixtureDir, "plcc.json")
+	operatorsPath := filepath.Join(fixtureDir, "operators.txt")
+	const input = `{"data":[{"name":"Combined","package":"a,b","is_operator":true,"versions":[{"name":"bad","phases":[]}]}]}`
+	if err := os.WriteFile(inputPath, []byte(input), 0o600); err != nil {
+		t.Fatalf("writing PLCC fixture: %v", err)
+	}
+	// Repeating a also verifies requested names are treated as a set: totals
+	// must use the same cardinality as deduplicated validation buckets.
+	if err := os.WriteFile(operatorsPath, []byte("a\na\n"), 0o600); err != nil {
+		t.Fatalf("writing operators fixture: %v", err)
+	}
+
+	outDir := t.TempDir()
+	stdout, stderr, exitCode := runPlccCheck(t,
+		"-i", inputPath,
+		"-o", outDir,
+		operatorsPath,
+	)
+	if exitCode != 0 {
+		t.Fatalf("exit code %d; stderr:\n%s", exitCode, stderr)
+	}
+	for _, want := range []string{
+		"Total operators:   1",
+		"PLCC INVALID:      1 / 1",
+		"PLCC OK:           0 / 1",
+	} {
+		if !strings.Contains(string(stdout), want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(string(stdout), "PLCC INVALID:      2 / 1") || strings.Contains(string(stdout), "PLCC OK:           -") {
+		t.Errorf("summary contains inconsistent counts:\n%s", stdout)
+	}
+}
+
+func TestPlccCheckSurfacesStaleCatalogPackage(t *testing.T) {
+	outDir := t.TempDir()
+	stdout, stderr, exitCode := runPlccCheck(t,
+		"-i", "testdata/untranslatable.json",
+		"--validators", "none",
+		"--catalog-image", "testdata/catalog-fbc-stale",
+		"-o", outDir,
+	)
+	if exitCode != 0 {
+		t.Fatalf("exit code %d; stderr:\n%s", exitCode, stderr)
+	}
+	for _, want := range []string{
+		"MISSING    OK       stale-operator",
+		"Total operators:   2",
+		"PLCC MISSING:      1 / 2",
+		"PLCC INVALID:      1 / 2",
+		"PLCC OK:           0 / 2",
+		"CATALOG OK:        1 / 2",
+		"CATALOG MISSING:   1 / 2",
+	} {
+		if !strings.Contains(string(stdout), want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 // TestPlccCheckAllPackages runs plcc-check.sh with no operators file (the
 // "check everything in PLCC" mode) and no validators, so the resulting FBC
 // output can be compared byte-for-byte against the existing e2e reference.

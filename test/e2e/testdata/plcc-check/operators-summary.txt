@@ -3,10 +3,10 @@ Running plcc2fbc with 4 operators...
 
 === Requested operators ===
      PLCC       OPERATOR
-  *  OK         aws-efs-csi-driver-operator     
-     INVALID    barbican-operator               
+  *  OK         aws-efs-csi-driver-operator
+     INVALID    barbican-operator
      MISSING    totally-nonexistent-operator-xyz
-     DUPLICATE  amq-streams                     
+     DUPLICATE  amq-streams
 
 === Summary ===
   Total operators:   4
@@ -29,7 +29,7 @@ Running plcc2fbc with 4 operators...
 - With issues: barbican-operator
 - PLCC OK: aws-efs-csi-driver-operator
 
- === Generated files ===
+=== Generated files ===
   $OUTDIR/fbc-output.yaml FBC blobs
   $OUTDIR/validation.jsonl Validation results
   $OUTDIR/slog.json Operational log

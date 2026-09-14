@@ -118,6 +118,7 @@ If `TestPlccCheckAllPackages`'s expected counts (`Total operators`, `PLCC OK`, `
 | `testSplit(t, referencePath, extraArgs...)` | Shared logic for split-mode tests: parses the reference, runs the binary with `--split`, and compares each per-package output file. |
 | `runPlccCheck(t, args...)` | Executes `scripts/plcc-check.sh` (in `plcc_check_test.go`), returns stdout, stderr, and exit code. Longer default timeout than `runBinary` since the script rebuilds the binary itself. |
 | `slogField(t, line, field)` | Parses one `slog.json` line and returns a named field, failing the test if the line isn't valid JSON or the field is absent. Used to check specific counts without requiring an exact byte-for-byte match (the `time` and `version` fields vary on every run). |
+| `assertFilesEqual(t, gotPath, wantPath)` | Compares a generated artifact byte-for-byte with its golden file. |
 
 ---
 
