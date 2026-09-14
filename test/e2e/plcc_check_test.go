@@ -91,13 +91,29 @@ func slogField(t *testing.T, line string, field string) any {
 	return v
 }
 
+func assertFilesEqual(t *testing.T, gotPath, wantPath string) {
+	t.Helper()
+	got, err := os.ReadFile(gotPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", gotPath, err)
+	}
+	want, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", wantPath, err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("%s does not match %s (got %d bytes, want %d bytes)",
+			gotPath, wantPath, len(got), len(want))
+	}
+}
+
 // TestPlccCheckOperatorsFile runs plcc-check.sh against a small, fixed
 // operators file (one passing, one failing, one missing, and one duplicated
 // package) so the generated files can be compared against small, reviewable
 // golden fixtures.
 func TestPlccCheckOperatorsFile(t *testing.T) {
 	outDir := t.TempDir()
-	_, stderr, exitCode := runPlccCheck(t,
+	stdout, stderr, exitCode := runPlccCheck(t,
 		"-i", "testdata/plcc.json",
 		"-o", outDir,
 		"testdata/plcc-check-operators.txt",
@@ -110,6 +126,9 @@ func TestPlccCheckOperatorsFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading summary.txt: %v", err)
 	}
+	if !bytes.Equal(stdout, summary) {
+		t.Errorf("stdout and summary.txt differ:\nstdout:\n%s\nsummary.txt:\n%s", stdout, summary)
+	}
 	// The "Generated files" section embeds outDir's absolute path, which
 	// differs on every run; normalize it before comparing to the golden file.
 	gotSummary := strings.ReplaceAll(string(summary), outDir, "$OUTDIR")
@@ -121,17 +140,10 @@ func TestPlccCheckOperatorsFile(t *testing.T) {
 		t.Errorf("summary.txt mismatch:\ngot:\n%s\nwant:\n%s", gotSummary, wantSummary)
 	}
 
-	gotValidation, err := os.ReadFile(filepath.Join(outDir, "validation.jsonl"))
-	if err != nil {
-		t.Fatalf("reading validation.jsonl: %v", err)
-	}
-	wantValidation, err := os.ReadFile("testdata/plcc-check/operators-validation.jsonl")
-	if err != nil {
-		t.Fatalf("reading golden validation.jsonl: %v", err)
-	}
-	if string(gotValidation) != string(wantValidation) {
-		t.Errorf("validation.jsonl mismatch:\ngot:  %s\nwant: %s", gotValidation, wantValidation)
-	}
+	assertFilesEqual(t,
+		filepath.Join(outDir, "validation.jsonl"),
+		"testdata/plcc-check/operators-validation.jsonl",
+	)
 
 	gotFBC, err := os.ReadFile(filepath.Join(outDir, "fbc-output.yaml"))
 	if err != nil {
@@ -179,6 +191,8 @@ func TestPlccCheckOperatorsFile(t *testing.T) {
 			want = map[string]any{"count": float64(4)}
 		case "PLCC product validation":
 			want = map[string]any{"passed": float64(1), "filtered": float64(1)}
+		case "PLCC product expansion":
+			want = map[string]any{"count": float64(1)}
 		case "wrote FBC data":
 			want = map[string]any{"count": float64(1)}
 		default:
@@ -376,6 +390,34 @@ func TestPlccCheckWebhookRejectsUnknownSection(t *testing.T) {
 	}
 	if !strings.Contains(string(stderr), "unsupported webhook section: details") {
 		t.Errorf("stderr = %q, want unsupported-section error", stderr)
+	}
+}
+
+func TestPlccCheckMissingFBCOutput(t *testing.T) {
+	outDir := t.TempDir()
+	stdout, stderr, exitCode := runPlccCheck(t,
+		"-i", "testdata/untranslatable.json",
+		"--validators", "none",
+		"-o", outDir,
+	)
+	if exitCode != 0 {
+		t.Fatalf("exit code %d; stderr:\n%s", exitCode, stderr)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "fbc-output.yaml")); !os.IsNotExist(err) {
+		t.Errorf("fbc-output.yaml should not exist; stat error = %v", err)
+	}
+	if strings.Contains(string(stdout), filepath.Join(outDir, "fbc-output.yaml")+" FBC blobs") {
+		t.Error("stdout claims the missing FBC output was generated")
+	}
+	if !strings.Contains(string(stderr), "not found") {
+		t.Errorf("stderr = %q, want missing-file error", stderr)
+	}
+	summary, err := os.ReadFile(filepath.Join(outDir, "summary.txt"))
+	if err != nil {
+		t.Fatalf("reading summary.txt: %v", err)
+	}
+	if !bytes.Equal(stdout, summary) {
+		t.Errorf("stdout and summary.txt differ:\nstdout:\n%s\nsummary.txt:\n%s", stdout, summary)
 	}
 }
 

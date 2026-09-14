@@ -40,3 +40,4 @@ Fetching catalog package list from $CATALOG_IMAGE...
   $OUTDIR/validation.jsonl Validation results
   $OUTDIR/slog.json Operational log
   $OUTDIR/catalog-packages.txt Catalog package list
+  $OUTDIR/summary.txt Summary

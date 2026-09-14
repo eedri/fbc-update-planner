@@ -147,11 +147,11 @@ parse_args() {
 }
 
 log_info() {
-    echo -e "$@" | tee -a "$FILE_SUM"
+    printf '%s\n' "$*" | tee -a "$FILE_SUM"
 }
 
 log_error() {
-    echo -e "Error: $@" >&2
+    printf 'Error: %s\n' "$*" >&2
 }
 
 check_dependencies() {
@@ -426,7 +426,8 @@ print_operator_list() {
         done
     fi
 
-    log_info "\n=== Requested operators ==="
+    log_info ""
+    log_info "=== Requested operators ==="
     if [[ -n "$g_catalog_image" ]]; then
         log_info "$(printf "  %-1s  %-9s  %-7s  %s\n" " " "PLCC" "CATALOG" "OPERATOR")"
     else
@@ -447,7 +448,8 @@ print_operator_list() {
 }
 
 print_summary() {
-    log_info "\n=== Summary ==="
+    log_info ""
+    log_info "=== Summary ==="
     local total=${#g_operators[@]}
     local missing_count=${#g_results_missing[@]}
     local duplicated_count=${#g_results_duplicated[@]}
@@ -469,7 +471,8 @@ print_summary() {
 }
 
 print_issues_detail() {
-    log_info "\n=== Validation issues detail ==="
+    log_info ""
+    log_info "=== Validation issues detail ==="
     local json_issues_count
     json_issues_count="$(echo "$g_results_issues" | jq 'length')"
     if [[ "$json_issues_count" -eq 0 ]]; then
@@ -480,7 +483,8 @@ print_issues_detail() {
 }
 
 print_csv_lists() {
-    log_info "\n=== CSV operator lists ==="
+    log_info ""
+    log_info "=== CSV operator lists ==="
     log_info "- Missing: $(IFS=,; echo "${g_results_missing[*]:-}")"
     log_info "- Duplicated: $(IFS=,; echo "${g_results_duplicated[*]:-}")"
     log_info "- With issues: $(IFS=,; echo "${g_results_withissues[*]:-}")"
@@ -496,9 +500,9 @@ _copy_one_file() {
     local file="$1" out="$2" msg="$3"
     if [[ ! -f "$file" ]]; then
         log_error "file $file not found"
-    else
-        cp -f "$file" "$out"
+        return
     fi
+    cp -f "$file" "$out"
     log_info "$(printf "  %-24s %s" "$out" "$msg")"
 }
 
@@ -516,14 +520,18 @@ copy_output_files() {
         msg_FBC="FBC blobs"
     fi
 
-    log_info "\n === Generated files ==="
+    log_info ""
+    log_info " === Generated files ==="
     _copy_one_file "$FILE_FBC" "$out_FBC" "$msg_FBC"
     _copy_one_file "$FILE_VAL" "$out_VAL" "$msg_VAL"
     _copy_one_file "$FILE_LOG" "$out_LOG" "$msg_LOG"
     if [[ -n "$g_catalog_image" ]]; then
         _copy_one_file "$FILE_CATALOG" "$g_outdir/catalog-packages.txt" "Catalog package list"
     fi
-    _copy_one_file "$FILE_SUM" "$out_SUM" "$msg_SUM"
+    # Log the summary destination before copying so summary.txt contains its
+    # own generated-file entry and is byte-for-byte identical to stdout.
+    log_info "$(printf "  %-24s %s" "$out_SUM" "$msg_SUM")"
+    cp -f "$FILE_SUM" "$out_SUM"
 }
 
 # Returns success when the requested webhook sections contain "$1".

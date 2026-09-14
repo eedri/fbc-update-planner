@@ -33,3 +33,4 @@ Running plcc2fbc with 4 operators...
   $OUTDIR/fbc-output.yaml FBC blobs
   $OUTDIR/validation.jsonl Validation results
   $OUTDIR/slog.json Operational log
+  $OUTDIR/summary.txt Summary
