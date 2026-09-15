@@ -270,7 +270,7 @@ fetch_catalog_packages() {
         exit 1
     fi
 
-    jq -r 'select(.schema == "io.openshift.operators.lifecycles.v1alpha1") | .package' \
+    jq -r 'select(.schema == "io.openshift.operators.lifecycles.v1alpha1") | .package // empty' \
         "$WORK_DIR/catalog-render.json" | sort -u >"$FILE_CATALOG"
 
     g_catalog_packages=()
@@ -618,6 +618,7 @@ _webhook_chunks_add() {
 
 _webhook_chunks_finish() {
     [[ -n "$g_webhook_chunk" ]] && printf '%s\036' "$g_webhook_chunk" >> "$g_webhook_chunks_file"
+    return 0
 }
 
 _write_ready_operator_chunks() {

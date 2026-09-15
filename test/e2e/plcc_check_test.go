@@ -39,6 +39,11 @@ const plccCheckScript = "../../scripts/plcc-check.sh"
 // longer timeout than runBinary's.
 func runPlccCheck(t *testing.T, args ...string) (stdout, stderr []byte, exitCode int) {
 	t.Helper()
+	return runPlccCheckWithEnv(t, nil, args...)
+}
+
+func runPlccCheckWithEnv(t *testing.T, env []string, args ...string) (stdout, stderr []byte, exitCode int) {
+	t.Helper()
 
 	timeout := 60 * time.Second
 	if dl, ok := t.Deadline(); ok {
@@ -59,6 +64,7 @@ func runPlccCheck(t *testing.T, args ...string) (stdout, stderr []byte, exitCode
 		"GITHUB_REPOSITORY=release-engineering/fbc-update-planner",
 		"GITHUB_RUN_ID=12345",
 	)
+	cmd.Env = append(cmd.Env, env...)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -266,6 +272,44 @@ func TestPlccCheckCatalogEmptyPackageName(t *testing.T) {
 	)
 	if exitCode != 0 {
 		t.Fatalf("exit code %d; stderr:\n%s", exitCode, stderr)
+	}
+}
+
+// TestPlccCheckCatalogNullPackageName verifies that a rendered lifecycle
+// object with a null package is ignored rather than becoming a stale catalog
+// package named "null" in an all-packages report.
+func TestPlccCheckCatalogNullPackageName(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeOpm := filepath.Join(fakeBin, "opm")
+	if err := os.WriteFile(fakeOpm, []byte(`#!/bin/sh
+printf '%s\n' '{"schema":"io.openshift.operators.lifecycles.v1alpha1","package":null}'
+`), 0o755); err != nil {
+		t.Fatalf("writing fake opm: %v", err)
+	}
+
+	outDir := t.TempDir()
+	stdout, stderr, exitCode := runPlccCheckWithEnv(t,
+		[]string{"PATH=" + fakeBin + string(os.PathListSeparator) + os.Getenv("PATH")},
+		"-i", "testdata/untranslatable.json",
+		"--validators", "none",
+		"-o", outDir,
+		"--catalog-image", "unused-catalog-reference",
+	)
+	if exitCode != 0 {
+		t.Fatalf("exit code %d; stderr:\n%s", exitCode, stderr)
+	}
+	if strings.Contains(string(stdout), "null") {
+		t.Errorf("stdout contains bogus null package:\n%s", stdout)
+	}
+	if !strings.Contains(string(stdout), "Total operators:   1") {
+		t.Errorf("stdout has unexpected operator count:\n%s", stdout)
+	}
+	catalogPackages, err := os.ReadFile(filepath.Join(outDir, "catalog-packages.txt"))
+	if err != nil {
+		t.Fatalf("reading catalog-packages.txt: %v", err)
+	}
+	if len(catalogPackages) != 0 {
+		t.Errorf("catalog-packages.txt = %q, want empty", catalogPackages)
 	}
 }
 
